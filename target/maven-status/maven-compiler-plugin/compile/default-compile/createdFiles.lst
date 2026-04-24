@@ -1,0 +1,5 @@
+com\sriven\tfnkmsservice\service\KeyService.class
+com\sriven\tfnkmsservice\service\BatchService.class
+com\sriven\tfnkmsservice\TfnKmsServiceApplication.class
+com\sriven\tfnkmsservice\controller\BatchController.class
+com\sriven\tfnkmsservice\controller\KeyController.class
