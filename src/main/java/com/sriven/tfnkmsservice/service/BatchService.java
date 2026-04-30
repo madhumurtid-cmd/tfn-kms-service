@@ -2,6 +2,7 @@ package com.sriven.tfnkmsservice.service;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 
@@ -16,34 +17,74 @@ public class BatchService {
         this.keyService = keyService;
     }
 
+    // =========================
+    // START BATCH
+    // =========================
+    @Transactional
     public Map<String, String> start(String batchId) {
 
         String runId = UUID.randomUUID().toString();
         String keyId = UUID.randomUUID().toString();
 
-        String dataKey = UUID.randomUUID().toString();
-        String encryptedKey = keyService.encryptWithMasterKey(dataKey);
+        try {
+            // 🔐 Generate data key
+            String dataKey = UUID.randomUUID().toString();
+            String encryptedKey = keyService.encryptWithMasterKey(dataKey);
 
-        // Insert KEY
-        jdbcTemplate.update(
-            "INSERT INTO KEY_REGISTRY (KEY_ID, KMS_KEY_REF, CREATED_AT) VALUES (?, ?, SYSTIMESTAMP)",
-            keyId, encryptedKey
-        );
+            // =========================
+            // INSERT KEY_REGISTRY
+            // =========================
+            jdbcTemplate.update(
+                "INSERT INTO KEY_REGISTRY " +
+                "(KEY_ID, KMS_PROVIDER, KMS_KEY_REF, KEY_VERSION, STATUS, CREATED_AT, CREATED_BY) " +
+                "VALUES (?, ?, ?, ?, ?, SYSTIMESTAMP, ?)",
+                keyId,
+                "LOCAL_KMS",        // or AWS later
+                encryptedKey,
+                1,
+                "ACTIVE",
+                "BATCH_PROCESS"
+            );
 
-        // Insert BATCH_RUN
-        jdbcTemplate.update(
-            "INSERT INTO BATCH_RUN (RUN_ID, BATCH_ID, START_TIME, STATUS, KEY_ID, CREATED_AT) " +
-            "VALUES (?, ?, SYSTIMESTAMP, 'STARTED', ?, SYSTIMESTAMP)",
-            runId, batchId, keyId
-        );
+            // =========================
+            // INSERT BATCH_RUN
+            // =========================
+            jdbcTemplate.update(
+                "INSERT INTO BATCH_RUN " +
+                "(RUN_ID, BATCH_ID, START_TIME, STATUS, KEY_ID, CREATED_AT) " +
+                "VALUES (?, ?, SYSTIMESTAMP, ?, ?, SYSTIMESTAMP)",
+                runId,
+                batchId,
+                "STARTED",
+                keyId
+            );
 
-        return Map.of("runId", runId, "keyId", keyId);
+            return Map.of(
+                "runId", runId,
+                "keyId", keyId
+            );
+
+        } catch (Exception e) {
+            throw new RuntimeException("Batch start failed", e);
+        }
     }
 
+    // =========================
+    // END BATCH
+    // =========================
+    @Transactional
     public void end(String runId) {
-        jdbcTemplate.update(
-            "UPDATE BATCH_RUN SET END_TIME = SYSTIMESTAMP, STATUS = 'COMPLETED' WHERE RUN_ID = ?",
+
+        int updated = jdbcTemplate.update(
+            "UPDATE BATCH_RUN " +
+            "SET END_TIME = SYSTIMESTAMP, STATUS = ? " +
+            "WHERE RUN_ID = ?",
+            "COMPLETED",
             runId
         );
+
+        if (updated == 0) {
+            throw new RuntimeException("RunId not found: " + runId);
+        }
     }
 }
