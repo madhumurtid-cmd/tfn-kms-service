@@ -3,6 +3,8 @@ package com.sriven.tfnkmsservice.service;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
 
 import java.util.*;
 
@@ -23,6 +25,10 @@ public class BatchService {
     @Transactional
     public Map<String, String> start(String batchId) {
 
+        if (batchId == null || batchId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "batchId is required");
+        }
+
         String runId = UUID.randomUUID().toString();
         String keyId = UUID.randomUUID().toString();
 
@@ -39,7 +45,7 @@ public class BatchService {
                 "(KEY_ID, KMS_PROVIDER, KMS_KEY_REF, KEY_VERSION, STATUS, CREATED_AT, CREATED_BY) " +
                 "VALUES (?, ?, ?, ?, ?, SYSTIMESTAMP, ?)",
                 keyId,
-                "LOCAL_KMS",        // or AWS later
+                "LOCAL_KMS",
                 encryptedKey,
                 1,
                 "ACTIVE",
@@ -65,7 +71,10 @@ public class BatchService {
             );
 
         } catch (Exception e) {
-            throw new RuntimeException("Batch start failed", e);
+            throw new ResponseStatusException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "Batch start failed: " + e.getMessage()
+            );
         }
     }
 
@@ -73,18 +82,87 @@ public class BatchService {
     // END BATCH
     // =========================
     @Transactional
-    public void end(String runId) {
+    public Map<String, Object> end(String runId) {
 
-        int updated = jdbcTemplate.update(
-            "UPDATE BATCH_RUN " +
-            "SET END_TIME = SYSTIMESTAMP, STATUS = ? " +
-            "WHERE RUN_ID = ?",
-            "COMPLETED",
+        if (runId == null || runId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "runId is required");
+        }
+
+        // 🔍 Validate run exists
+        Integer exists = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM BATCH_RUN WHERE RUN_ID = ?",
+            Integer.class,
             runId
         );
 
-        if (updated == 0) {
-            throw new RuntimeException("RunId not found: " + runId);
+        if (exists == null || exists == 0) {
+            throw new ResponseStatusException(
+                HttpStatus.NOT_FOUND,
+                "RunId not found: " + runId
+            );
         }
+
+        // =========================
+        // 1. Get stats (NULL SAFE)
+        // =========================
+        Map<String, Object> stats = jdbcTemplate.queryForMap(
+            "SELECT " +
+            "COUNT(*) AS total, " +
+            "NVL(SUM(CASE WHEN STATUS = 'SUCCESS' THEN 1 ELSE 0 END),0) AS success, " +
+            "NVL(SUM(CASE WHEN STATUS = 'FAIL' AND RETRY_COUNT >= 3 THEN 1 ELSE 0 END),0) AS failed, " +
+            "NVL(SUM(CASE WHEN STATUS = 'FAIL' AND RETRY_COUNT < 3 THEN 1 ELSE 0 END),0) AS retryable " +
+            "FROM STG_TFN_PROCESS " +
+            "WHERE RUN_ID = ?",
+            runId
+        );
+
+        int total = ((Number) stats.get("TOTAL")).intValue();
+        int success = ((Number) stats.get("SUCCESS")).intValue();
+        int failed = ((Number) stats.get("FAILED")).intValue();
+        int retryable = ((Number) stats.get("RETRYABLE")).intValue();
+
+        // =========================
+        // 2. Decide batch status
+        // =========================
+        String status;
+
+        if (total == 0) {
+            status = "FAILED";
+        } else if (retryable > 0) {
+            status = "IN_PROGRESS";
+        } else if (failed == 0 && success == total) {
+            status = "COMPLETED";
+        } else if (success == 0) {
+            status = "FAILED";
+        } else {
+            status = "PARTIAL_SUCCESS";
+        }
+
+        // =========================
+        // 3. Update batch_run
+        // =========================
+        jdbcTemplate.update(
+            "UPDATE BATCH_RUN " +
+            "SET END_TIME = SYSTIMESTAMP, " +
+            "DURATION_MS = (SYSTIMESTAMP - START_TIME) * 86400000, " +
+            "STATUS = ?, " +
+            "RECORDS_PROCESSED = ? " +
+            "WHERE RUN_ID = ?",
+            status,
+            total,
+            runId
+        );
+
+        // =========================
+        // 4. Return summary
+        // =========================
+        return Map.of(
+            "runId", runId,
+            "status", status,
+            "total", total,
+            "success", success,
+            "failed", failed,
+            "retryable", retryable
+        );
     }
 }
